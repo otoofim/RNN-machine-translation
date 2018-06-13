@@ -53,6 +53,11 @@ class EncoderDecoder(Chain):
         - Explain the following lines of code
         - Think about what add_link() does and how can we access Links added in Chainer.
         - Why are there two loops or adding links?
+
+
+	In this part of the code, the layers of RNN is built. Each layer is a fully-connected LSTM layer and will be added to our Chainer class.
+ 	By calling for example self[lstm_enc[0]] which is a dictionary we can access the first layer in encoder. 
+	Since we use bidirectional encoder, there are two "for loops". The first one is for the forward RNN (reads input sequence from left to right) and the second one is for backward RNN 		(reads the sequence in the reverse order).
         '''
         self.lstm_enc = ["L{0:d}_enc".format(i) for i in range(nlayers_enc)]
         for lstm_name in self.lstm_enc:
@@ -77,6 +82,9 @@ class EncoderDecoder(Chain):
         - L.Linear(2*n_units, vsize_dec)
 
         Why are we using multipliers over the base number of units (n_units)?
+
+        Since we use bidirectional encoder we need to embed the result of encoder to feed it to decoder. Thus, we use 2 times n_units for the output of embedID. In addition, because the input of encoder LSTM layers is EmbedID so the first dimention and second dimention (this is the designer decision to set the second dimension to whatever he wants.) of the LSTM layers are 2*n_units. Moreover, the size of the first dimension of linear layer or output layer should be equall to the second dimension of LSTM layer because LSTM layer is the input of linear layer and its second dimension should be equall to size of vocabulary since it is the probability distribution over our vocabulary to choose the best word.  
+
         '''
 
         self.add_link("embed_dec", L.EmbedID(vsize_dec, 2*n_units))
@@ -115,6 +123,7 @@ class EncoderDecoder(Chain):
         ___QUESTION-1-DESCRIBE-C-START___
 
         Describe what the function set_decoder_state() is doing. What are c_state and h_state?
+	This function feeds cell state and output of the last encoder layer(forward and backward direction) to the first decoder layer. In other words, it transfers output of the encoder to the decoder.
     '''
     def set_decoder_state(self):
         xp = cuda.cupy if self.gpuid >= 0 else np
@@ -133,10 +142,12 @@ class EncoderDecoder(Chain):
     def feed_lstm(self, word, embed_layer, lstm_layer_list, train):
         # get embedding for word
         embed_id = embed_layer(word)
+        #embed_id=F.dropout(embed_id, ratio=0.2, train=train)
         # feed into first LSTM layer
         hs = self[lstm_layer_list[0]](embed_id)
         # feed into remaining LSTM layers
         for lstm_layer in lstm_layer_list[1:]:
+            #hs=F.dropout(hs, ratio=0.2, train=train)
             hs = self[lstm_layer](hs)
 
     # Function to encode an source sentence word
@@ -165,27 +176,30 @@ class EncoderDecoder(Chain):
 
         # encode tokens
         for f_word, r_word in zip(var_en, var_rev_en):
-            '''
-            ___QUESTION-1-DESCRIBE-D-START___
+           '''
+           ___QUESTION-1-DESCRIBE-D-START___
 
-            - Explain why we are performing two encode operations
-            '''
-            self.encode(f_word, self.lstm_enc, train)
-            self.encode(r_word, self.lstm_rev_enc, train)
+           - Explain why we are performing two encode operations
+	   To consider the importance of words' location into account we have two encoder that the first one goes from left to right and the second one goes from right to left. The following two lines feed the sentence in forward and backward direction word by word to the corresponding encoder (the first one for forward and the scond one foe backward traverse). 
+           '''
+           self.encode(f_word, self.lstm_enc, train)
+           self.encode(r_word, self.lstm_rev_enc, train)
 
-            '''___QUESTION-1-DESCRIBE-D-END___'''
+           '''___QUESTION-1-DESCRIBE-D-END___'''
 
 
-            # __QUESTION -- Following code is to assist with ATTENTION
-            # enc_states stores the hidden state vectors of the encoder
-            # this can be used for implementing attention
-            if first_entry == False:
-                h_state = F.concat((self[self.lstm_enc[-1]].h, self[self.lstm_rev_enc[-1]].h), axis=1)
-                enc_states = F.concat((enc_states, h_state), axis=0)
-            else:
-                enc_states = F.concat((self[self.lstm_enc[-1]].h, self[self.lstm_rev_enc[-1]].h), axis=1)
-                first_entry = False
-
+           # __QUESTION -- Following code is to assist with ATTENTION
+           # enc_states stores the hidden state vectors of the encoder
+           # this can be used for implementing attention
+           if first_entry == False:
+              forward_states = F.concat((forward_states, self[self.lstm_enc[-1]].h), axis=0)
+              backward_states = F.concat((self[self.lstm_rev_enc[-1]].h, backward_states), axis=0)
+           else:
+              forward_states = self[self.lstm_enc[-1]].h
+              backward_states = self[self.lstm_rev_enc[-1]].h
+              first_entry = False
+    
+        enc_states = F.concat((forward_states, backward_states), axis=1)
         return enc_states
 
 
@@ -197,13 +211,16 @@ class EncoderDecoder(Chain):
             indx = xp.argmax(prob.data[0])
             pred_word = Variable(xp.asarray([indx], dtype=np.int32), volatile=not train)
         else:
+
+            sam=np.random.choice(range(len(prob.data[0])), p=prob.data[0])
+
+            pred_word = Variable(xp.asarray([sam], dtype=np.int32), volatile=not train)
             '''
             ___QUESTION-2-SAMPLE
 
             - Add code to sample from the probability distribution to
             choose the next word
             '''
-            pass
         return pred_word
 
     def encode_decode_train(self, in_word_list, out_word_list, train=True, sample=False):
@@ -230,9 +247,16 @@ class EncoderDecoder(Chain):
             if self.attn == NO_ATTN:
                 predicted_out = self.out(self[self.lstm_dec[-1]].h)
             else:
-                # __QUESTION Add attention
-                pass
+                
+                alpha_arr = xp.empty((0,enc_states.shape[0]), dtype=xp.float32)
+                alpha_arr = (xp.dot(self[self.lstm_dec[-1]].h.data,enc_states.data.T))
+                alpha_arr = F.softmax(alpha_arr)
 
+                ct = Variable(xp.dot(alpha_arr.data,enc_states.data), volatile="auto")
+                h_o = F.concat((ct, self[self.lstm_dec[-1]].h), axis=1)
+
+                predicted_out = F.tanh(self.att(h_o))
+                predicted_out = self.out(predicted_out)
             # compute loss
             prob = F.softmax(predicted_out)
 
@@ -242,6 +266,7 @@ class EncoderDecoder(Chain):
             ___QUESTION-1-DESCRIBE-E-START___
             Explain what loss is computed with an example
             What does this value mean?
+	    Soft max cross entropy computes the probability distribution over each possible word in  our vocabulary and then computes the difference between predicted probabilities and the actual word that should appear
             '''
             self.loss += F.softmax_cross_entropy(predicted_out, next_word_var)
             '''___QUESTION-1-DESCRIBE-E-END___'''
@@ -270,8 +295,17 @@ class EncoderDecoder(Chain):
             if self.attn == NO_ATTN:
                 prob = F.softmax(self.out(self[self.lstm_dec[-1]].h))
             else:
-                # __QUESTION Add attention
-                pass
+                
+                alpha_arr2 = xp.empty((0,enc_states.shape[0]), dtype=xp.float32)
+                alpha_arr2 = (xp.dot(self[self.lstm_dec[-1]].h.data,enc_states.data.T))
+                alpha_arr2 = F.softmax(alpha_arr2)
+
+                alpha_arr = F.concat((alpha_arr, alpha_arr2), axis=0)
+
+                ct = Variable(xp.dot(alpha_arr2.data,enc_states.data), volatile="auto")
+                h_o = F.concat((ct, self[self.lstm_dec[-1]].h), axis=1)
+                predicted_out = F.tanh(self.att(h_o))
+                predicted_out = self.out(predicted_out)
 
             pred_word = self.select_word(prob, train=False, sample=sample)
             # add integer id of predicted word to output list

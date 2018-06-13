@@ -78,6 +78,7 @@ optimizer.setup(model)
 ___QUESTION-1-DESCRIBE-F-START___
 
 - Describe what the following line of code does
+The following code add gradient descent optimizer with regularization term (L2 norm with threshold equall to 5) to our model to update it in each itration.
 '''
 optimizer.add_hook(chainer.optimizer.GradientClipping(threshold=5))
 '''___QUESTION-1-DESCRIBE-F-END___'''
